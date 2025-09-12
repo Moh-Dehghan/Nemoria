@@ -1,4 +1,7 @@
 # Nemoria
+[![PyPI version](https://badge.fury.io/py/nemoria.svg)](https://pypi.org/project/nemoria/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/nemoria.svg)](https://pypi.org/project/nemoria/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Nemoria** is a lightweight, asynchronous, in-memory datastore with secure client-server protocol, supporting real-time multi-client CRUD operations. 
 It is designed for **fast prototyping, experiments, and educational use cases** where a minimal and hackable data layer is needed.  
