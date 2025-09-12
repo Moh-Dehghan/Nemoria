@@ -3,6 +3,3 @@ __pycache__/
 
 # Virtual environment
 .venv/
-
-# Others
-dist/

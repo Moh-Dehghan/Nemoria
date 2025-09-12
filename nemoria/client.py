@@ -66,7 +66,7 @@ class Client:
         # Serialize request/response I/O over a single socket.
         self.lock = asyncio.Lock()
 
-    async def connect(self) -> None:
+    async def connect(self) -> bool:
         """
         Open the TCP connection and complete the handshake.
 
@@ -75,14 +75,15 @@ class Client:
         """
 
         try:
-            # Establish connection with a bounded handshake timeout.
-            self.reader, self.writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port), HANDSHAKE_TIMEOUT
+            # Establish connection.
+            self.reader, self.writer = await asyncio.open_connection(
+                self.host,
+                self.port,
             )
 
             # Perform handshake and read server's connection metadata.
             if (connection_json := await self.handshake()) is None:
-                raise ConnectionError("Connection not established.")
+                raise ConnectionError
             self.connection = Connection.deserialize(
                 connection_json, self.reader, self.writer
             )
@@ -101,10 +102,17 @@ class Client:
                 # Some platforms (e.g., Windows) may not support this.
                 pass
 
+            # Success
+            return True
+        except ConnectionError:
+            logger.error(f"Connection not established.")
         except Exception:
             logger.error(f"Connection to {(self.host, self.port)} FAILED.")
             # Ensure any half-open endpoints are closed.
             await self.close()
+
+        # Failed
+        return False
 
     async def close(self) -> None:
         """

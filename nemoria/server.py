@@ -64,29 +64,32 @@ class Server:
         # Application data store (customize/replace as needed)
         self.store = Store()
 
-    async def run_forever(self) -> None:
+    async def run_forever(self, raise_on_error: bool = True) -> None:
         """
         Bind, listen, and serve until cancelled or shutdown is requested.
 
         Installs SIGINT/SIGTERM handlers (when supported) that trigger a
         graceful shutdown. Common bind errors are logged with helpful messages.
 
-        Lifecycle:
-            1) Validate bind address
-            2) Start the asyncio server
-            3) Serve forever (await)
-            4) On exit, call `shutdown()` exactly once
+        Args:
+            raise_on_error:
+                If True, any error encountered during bind or serve will be
+                re-raised to the caller *after* graceful shutdown is performed.
+                If False, errors will be logged but swallowed.
         """
-        try:
-            if not await validate_addr(self.host, self.port):
-                # Mirror real OS bind failure to unify error path
-                raise OSError(EADDRNOTAVAIL)
+        exc: Optional[BaseException] = None  # store error to re-raise later
 
+        try:
+            # Validate host:port before binding
+            if not await validate_addr(self.host, self.port):
+                raise OSError(EADDRNOTAVAIL, "address not available")
+
+            # Create the asyncio server and bind the socket
             self.server = await asyncio.start_server(
                 self.handle_connection, self.host, self.port
             )
 
-            # OS signals → request shutdown (schedule, don’t block the loop)
+            # Register OS signal handlers for graceful shutdown
             loop = asyncio.get_running_loop()
             try:
                 loop.add_signal_handler(
@@ -96,19 +99,20 @@ class Server:
                     signal.SIGTERM, lambda: asyncio.create_task(self.shutdown())
                 )
             except NotImplementedError:
-                # Some platforms (e.g., Windows) do not support signal handlers
+                # Some platforms (e.g., Windows) do not support signals
                 pass
 
+            # Run server until cancelled
             async with self.server:
                 logger.info(f"[{self.namespace}] LISTENING ON {(self.host, self.port)}")
                 await self.server.serve_forever()
 
         except asyncio.CancelledError:
-            # Let shutdown run in finally
+            # Normal cancellation (Ctrl+C, shutdown requested) → ignore
             pass
 
         except OSError as e:
-            # Categorize common bind errors
+            # Categorize common bind failures
             if e.errno == EADDRINUSE:
                 logger.error(
                     f"[{self.namespace}] address in use: {(self.host, self.port)}"
@@ -123,18 +127,25 @@ class Server:
                     f"[{self.namespace}] address not available: {(self.host, self.port)}"
                 )
             else:
-                logger.exception(
-                    f"[{self.namespace}] OS error on bind {(self.host, self.port)}"
+                logger.error(
+                    f"[{self.namespace}] OS error on bind {(self.host, self.port)}: {e!r}"
                 )
+            exc = e
 
-        except Exception:
+        except Exception as e:
+            # Any other unexpected error
             logger.exception(
                 f"[{self.namespace}] unexpected error on {(self.host, self.port)}"
             )
+            exc = e
 
         finally:
-            # Single, central shutdown point
-            return await self.shutdown()
+            # Always shutdown server gracefully
+            await self.shutdown()
+
+            # Optionally propagate the error upward
+            if raise_on_error and exc is not None:
+                raise exc
 
     async def shutdown(self) -> None:
         """

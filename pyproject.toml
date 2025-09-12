@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "nemoria"
 dynamic = ["version"]
-description = "Async TCP in-memory key-value store (server/client) with framed and secured protocol."
+description = "Async TCP in-memory datastore with secure client-server protocol, supporting real-time multi-client CRUD operations."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

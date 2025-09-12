@@ -39,7 +39,9 @@ async def main():
         namespace="TEST",
         password="12345678",
     )
-    await server.run_forever()
+
+    # Run server
+    await server.run_forever(raise_on_error=False)
 
 
 if __name__ == "__main__":

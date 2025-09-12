@@ -31,22 +31,30 @@ async def main():
     """
     client = Client(host="localhost", port=1234, password="12345678")
 
-    await client.connect()
+    # Connect
+    if not await client.connect():
+        return
 
-    # Set value at nested route: one/two/3 = 4
-    route = Route("one", "two", "3")
-    await client.set(route, 4)
+    # Create data
+    await client.set(Route("user", "profile", "name"), "Alice")
+    await client.set(Route("user", "profile", "age"), 30)
+
+    # Read data
+    print(await client.get(Route("user", "profile", "name")))  # -> "Alice"
+    print(await client.all())  # -> {'user': {'profile': {'name': 'Alice', 'age': 30}}}
+
+    # Update data
+    await client.set(Route("user", "profile", "age"), 31)
+    print(await client.get(Route("user", "profile", "age")))  # -> 31
+
+    # Delete part of a route
+    await client.delete(Route("user", "profile", "age"))
     print(await client.all())
 
-    # Delete intermediate route: one/two
-    await client.delete(Route("one", "two"))
-    print(await client.all())
+    # Drop the entire top-level route
+    await client.drop(Route("user"))
+    print(await client.all())  # -> {}
 
-    # Drop top-level route: one
-    await client.drop(Route("one"))
-    print(await client.all())
-
-    # Keep alive until manual interruption
     await asyncio.Future()
 
 
