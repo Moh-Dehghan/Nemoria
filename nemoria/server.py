@@ -42,6 +42,8 @@ class Server:
         port: int = 8888,
         namespace: str = "Nemoria",
         password: Optional[str] = None,
+        file: Optional[str] = None,
+        file_format: Optional[Literal["JSON", "YAML"]] = None,
     ) -> None:
         """
         Initialize server state (does not bind or listen yet).
@@ -51,6 +53,8 @@ class Server:
             port: TCP port to listen on.
             namespace: Name used in logs to distinguish instances.
             password: Optional shared secret used by the protocol.
+            file: Destination path. (e.g. "output.json")
+            file_format: "JSON" or "YAML" (see `FORMATS`).
         """
         self.host = host
         self.port = port
@@ -62,7 +66,7 @@ class Server:
         self.connections: Set[Connection] = set()
 
         # Application data store (customize/replace as needed)
-        self.store = Store()
+        self.store = Store(file=file, file_format=file_format)
 
     async def run_forever(self, raise_on_error: bool = True) -> None:
         """
@@ -220,6 +224,9 @@ class Server:
                 await self.store.purge()
                 # ACK
                 await send(connection.writer, Frame(reply_to=frame), self.password)
+
+            case Action.SAVE:
+                await self.store.save()
 
             case Action.PING:
                 await send(connection.writer, Frame(reply_to=frame), self.password)

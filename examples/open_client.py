@@ -38,6 +38,7 @@ async def main():
     # Create data
     await client.set(Route("user", "profile", "name"), "Alice")
     await client.set(Route("user", "profile", "age"), 30)
+    await client.save()
 
     # Read data
     print(await client.get(Route("user", "profile", "name")))  # -> "Alice"

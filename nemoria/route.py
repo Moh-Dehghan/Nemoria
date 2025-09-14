@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Union, Hashable, Tuple, Iterator, overload
+from typing import Union, Hashable, Tuple, Iterator, Self, overload
 from nemoria.cryptography import b64u_encode, b64u_decode
 from nemoria.serializer import from_wire, to_wire
 
@@ -80,8 +80,8 @@ class Route:
         )
         return b64u_encode(data)
 
-    @staticmethod
-    def decode(token: str) -> Route:
+    @classmethod
+    def decode(cls, token: str) -> Self:
         """
         Decode a Base64URL string back into a `Route`.
 
@@ -99,9 +99,9 @@ class Route:
         if not isinstance(payload, list):
             raise ValueError("invalid route payload (expected JSON array)")
         segs: Tuple[Hashable, ...] = tuple(from_wire(x) for x in payload)
-        return Route(*segs)
+        return cls(*segs)
 
-    def __truediv__(self, other: Hashable) -> Route:
+    def __truediv__(self, other: Hashable) -> Self:
         """
         Return a new route extended by one segment using `/`.
 
@@ -144,9 +144,9 @@ class Route:
     @overload
     def __getitem__(self, idx: int) -> Hashable: ...
     @overload
-    def __getitem__(self, idx: slice) -> Route: ...
+    def __getitem__(self, idx: slice) -> Self: ...
 
-    def __getitem__(self, idx: Union[int, slice]) -> Union[Hashable, Route]:
+    def __getitem__(self, idx: Union[int, slice]) -> Union[Hashable, Self]:
         """
         Index or slice the route.
 

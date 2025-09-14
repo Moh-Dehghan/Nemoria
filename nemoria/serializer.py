@@ -21,6 +21,9 @@ from __future__ import annotations
 from typing import Hashable
 
 
+__all__ = ("to_wire", "from_wire")
+
+
 def to_wire(seg: Hashable) -> object:
     """
     Serialize a single route segment into a JSON-safe form.

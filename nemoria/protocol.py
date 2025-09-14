@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional, Hashable, Dict
+from typing import Any, Optional, Hashable, Dict, Self
 from nemoria.cryptography import uniqID
 from nemoria.route import Route
 
@@ -37,6 +37,7 @@ class Action(Enum):
     DELETE = "DELETE"
     DROP = "DROP"
     PURGE = "PURGE"
+    SAVE = "SAVE"
     PING = "PING"
     HANDSHAKE = "HANDSHAKE"
     SHUTDOWN = "SHUTDOWN"
@@ -124,8 +125,8 @@ class Frame:
             "reply_to": None if self.reply_to is None else self.reply_to.serialize(),
         }
 
-    @staticmethod
-    def deserialize(obj: JSON) -> Frame:
+    @classmethod
+    def deserialize(cls, obj: JSON) -> Self:
         """
         Reconstruct a `Frame` from its serialized dict form.
 
@@ -140,7 +141,7 @@ class Frame:
             ValueError: If `action` or `route` fail to decode.
             TypeError: If `obj` is not a dict-like structure.
         """
-        return Frame(
+        return cls(
             id=obj["id"],
             action=None if obj["action"] is None else Action.from_str(obj["action"]),
             route=None if obj["route"] is None else Route.decode(obj["route"]),
@@ -185,10 +186,10 @@ class Connection:
         """
         return {"id": self.id, "host": self.host, "port": self.port}
 
-    @staticmethod
+    @classmethod
     def deserialize(
-        obj: JSON, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> Connection:
+        cls, obj: JSON, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> Self:
         """
         Reconstruct a `Connection` from serialized metadata plus streams.
 
@@ -206,4 +207,4 @@ class Connection:
         """
         if not isinstance(obj, dict):
             raise TypeError("Connection JSON must be a dict.")
-        return Connection(obj["id"], obj["host"], obj["port"], reader, writer)
+        return cls(obj["id"], obj["host"], obj["port"], reader, writer)

@@ -44,5 +44,5 @@ from .client import Client
 from .route import Route
 
 
-__all__ = ["Server", "Client", "Route"]
-__version__ = "1.0.0"
+__all__ = ("Server", "Client", "Route")
+__version__ = "1.0.5"

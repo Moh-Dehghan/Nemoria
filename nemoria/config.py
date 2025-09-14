@@ -13,6 +13,9 @@ from __future__ import annotations
 from typing import Optional
 
 
+__all__ = ("DEFAULT_TIMEOUT", "PING_TIMEOUT", "HANDSHAKE_TIMEOUT")
+
+
 # Alias used across the codebase for clarity
 TIMEOUT = Optional[float]
 

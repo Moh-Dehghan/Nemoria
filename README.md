@@ -4,11 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Nemoria** is a lightweight, asynchronous, in-memory datastore with secure client-server protocol, supporting real-time multi-client CRUD operations. 
-It is designed for **fast prototyping, experiments, and educational use cases** where a minimal and hackable data layer is needed.  
 
-✨ With Nemoria, you can **read and write data in real time** from **any process, thread, or program**, using multiple clients simultaneously.
+With Nemoria, you can **read and write data in real time** from **any process, thread, or program**, using multiple clients simultaneously.
 
-Think of it as a tiny Redis-like system built entirely in Python/asyncio.
+✨ Think of it as a tiny **Redis**-like system built entirely in Python.
 
 ---
 
@@ -17,7 +16,7 @@ Think of it as a tiny Redis-like system built entirely in Python/asyncio.
 - 🚀 **Asynchronous I/O** powered by `asyncio`
 - 🔑 **Password-based authentication**
 - 🧩 **Nested routes** with hierarchical `Route` objects
-- ⚡ **Simple CRUD API** (`get`, `all`, `set`, `delete`, `drop`, `purge`, `ping`)
+- ⚡ **Simple CRUD API** (`get`, `all`, `set`, `delete`, `drop`, `purge`, `save`, `ping`)
 - 🔄 **Multi-client access** – read and write data in real time across any process, thread, or external program
 - 🛠 **Minimalistic & extensible design** for custom protocols
 
@@ -27,7 +26,7 @@ Think of it as a tiny Redis-like system built entirely in Python/asyncio.
 
 ### A) Install from PyPI
 ```bash
-pip install nemoria
+pip install nemoria -U
 ```
 
 ---
@@ -41,29 +40,10 @@ pip install -e .
 
 ---
 
-### C) Install from built distributions (dist/)
-
-**Wheel (recommended)**
-```bash
-pip install dist/nemoria-1.0.0-py3-none-any.whl
-```
-
-**Or Source tarball**
-```bash
-pip install dist/nemoria-1.0.0.tar.gz
-```
-
----
-
 ### Verification
 Check if the package is installed correctly:
 ```bash
 python -c "import nemoria; print(nemoria.__version__)"
-```
-Or:
-```python
-import nemoria
-print(nemoria.__version__)
 ```
 
 ---
@@ -78,7 +58,14 @@ import asyncio
 from nemoria import Server
 
 async def main():
-    server = Server(host="localhost", port=1234, namespace="TEST", password="12345678")
+    server = Server(
+        host="localhost",
+        port=1234,
+        namespace="Nemoria",
+        password="12345678",
+        file="output.yaml",
+        file_format="YAML",
+    )
 
     # Run server
     await server.run_forever(raise_on_error=False)
@@ -114,7 +101,9 @@ async def main():
 
     # Create data
     await client.set(Route("user", "profile", "name"), "Alice")
-    await client.set(Route("user", "profile", "age"), 30)
+
+    # Set data & Save on disk
+    await client.set(Route("user", "profile", "age"), 30, save=True)
 
     # Read data
     print(await client.get(Route("user", "profile", "name")))  # -> "Alice"
@@ -128,8 +117,8 @@ async def main():
     await client.delete(Route("user", "profile", "age"))
     print(await client.all())
 
-    # Drop the entire top-level route
-    await client.drop(Route("user"))
+    # Drop the entire top-level route & Save on disk
+    await client.drop(Route("user"), save=True)
     print(await client.all())  # -> {}
 
     await asyncio.Future()
@@ -169,7 +158,7 @@ print(await client.all())
 # }
 ```
 
-### Deleting & Dropping & Purging
+### Deleting & Dropping & Purging & Saving
 
 ```python
 # Delete just one nested field
@@ -180,6 +169,9 @@ await client.drop(Route("blog", "posts"))
 
 # Clear entire datastore
 await client.purge()
+
+# Save on disk
+await client.save()
 ```
 
 ### Ping & Healthcheck
@@ -193,11 +185,22 @@ print(await client.is_alive()) # -> True or False
 
 ```
 
+### Close Client & Shutdown Server
+
+```python
+# Close Client
+await client.close()
+
+# Shutdown Server
+await client.shutdown()
+
+```
+
 ---
 
 ## Development Notes
 
-Nemoria is intentionally designed to be **minimalistic yet extensible**, with a focus on clarity, hackability, and serving as an educational reference.  
+Nemoria is intentionally designed to be **minimalistic yet extensible**, with a focus on clarity.
 
 - 🧩 **Architecture**:  
   The system follows a clear client–server separation.  
@@ -214,11 +217,6 @@ Nemoria is intentionally designed to be **minimalistic yet extensible**, with a 
   - Prioritize **readability** and **hackability** over heavy optimizations.  
   - Provide a safe playground for learning about async networking and protocol design.  
   - Allow easy extension for advanced features like persistence, clustering, and pub/sub.  
-
-- 🛠 **Intended Use**:  
-  - Great for **fast prototyping** when you need a lightweight datastore.  
-  - Suitable for **experiments** in distributed systems and protocol design.  
-  - Serves as a **teaching tool** for learning asyncio, client-server patterns, and hierarchical data structures.  
 
 ---
 

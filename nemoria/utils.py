@@ -18,6 +18,9 @@ from nemoria.cryptography import encrypt, decrypt
 from nemoria.protocol import Frame
 
 
+__all__ = ("recv", "send", "validate_addr")
+
+
 async def recv(reader: asyncio.StreamReader, pwd: Optional[str] = None) -> Frame:
     """
     Read one length-prefixed frame and return a `Frame` instance.
