@@ -24,12 +24,12 @@ Persistence note (SAVE):
 from __future__ import annotations
 
 import asyncio, signal, time
+from pyroute import Route
 from collections import deque
 from typing import Optional, Any, Union, Hashable, Dict, Literal, Deque
 from nemoria.logger import logger
 from nemoria.config import DEFAULT_TIMEOUT, PING_TIMEOUT, HANDSHAKE_TIMEOUT
 from nemoria.protocol import Connection, Frame, Action, JSON
-from nemoria.route import Route
 from nemoria.utils import send, recv
 
 
@@ -397,7 +397,7 @@ class Client:
             - If you require confirmation that the data was written, use an explicit
             consistency check or design a server-side ACK.
         """
-        await send(self.writer, Frame(action=Action.SAVE), self.password)
+        await self._send(Frame(action=Action.SAVE))
 
     async def ping(self) -> Optional[float]:
         """

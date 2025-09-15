@@ -25,15 +25,13 @@ from __future__ import annotations
 
 import os
 import json
+import yaml
 import asyncio
-from typing import Optional, Any, Hashable, MutableMapping, Dict
-
 import aiofiles
 import aiofiles.os as aios
-import yaml
-
+from pyroute import Route
+from typing import Optional, Any, Hashable, MutableMapping, Dict
 from nemoria.logger import logger
-from nemoria.route import Route
 
 
 FORMATS = ("JSON", "YAML")

@@ -41,8 +41,7 @@ Quick Example:
 
 from .server import Server
 from .client import Client
-from .route import Route
-
+from pyroute import Route
 
 __all__ = ("Server", "Client", "Route")
-__version__ = "1.0.5"
+__version__ = "1.0.6"

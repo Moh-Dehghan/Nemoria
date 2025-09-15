@@ -12,7 +12,8 @@ errors are allowed to propagate so callers can decide how to handle them.
 
 from __future__ import annotations
 
-import asyncio, socket
+import asyncio
+import socket
 from typing import Optional
 from nemoria.cryptography import encrypt, decrypt
 from nemoria.protocol import Frame

@@ -91,6 +91,7 @@ python server.py
 # client.py
 import asyncio
 from nemoria import Client, Route
+# Also you can import Route from pyroute module -> from pyroute import Route
 
 async def main():
     client = Client(host="localhost", port=1234, password="12345678")
