@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from typing import Optional
+
+
 """
 Timeout configuration for Nemoria components.
 
@@ -8,13 +13,7 @@ All values are in seconds. Any of them may be `None` to mean *wait indefinitely*
 - HANDSHAKE_TIMEOUT: deadline to complete the initial handshake
 """
 
-from __future__ import annotations
-
-from typing import Optional
-
-
 __all__ = ("DEFAULT_TIMEOUT", "PING_TIMEOUT", "HANDSHAKE_TIMEOUT")
-
 
 # Alias used across the codebase for clarity
 TIMEOUT = Optional[float]

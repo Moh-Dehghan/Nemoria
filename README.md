@@ -63,8 +63,6 @@ async def main():
         port=1234,
         namespace="Nemoria",
         password="12345678",
-        file="output.yaml",
-        file_format="YAML",
     )
 
     # Run server
@@ -101,28 +99,41 @@ async def main():
         return
 
     # Create data
-    await client.set(Route("user", "profile", "name"), "Alice")
-
-    # Set data & Save on disk
-    await client.set(Route("user", "profile", "age"), 30, save=True)
+    await client.set(route=Route("user", "profile", "name"), value="Alice")
+    await client.set(route=Route("user", "profile", "age"), value=30)
+    await client.save(codec="json", path="config.json", threadsafe=True)
 
     # Read data
-    print(await client.get(Route("user", "profile", "name")))  # -> "Alice"
+    print(await client.get(route=Route("user", "profile", "name")))  # -> "Alice"
     print(await client.all())  # -> {'user': {'profile': {'name': 'Alice', 'age': 30}}}
 
     # Update data
-    await client.set(Route("user", "profile", "age"), 31)
-    print(await client.get(Route("user", "profile", "age")))  # -> 31
-
-    # Delete part of a route
-    await client.delete(Route("user", "profile", "age"))
+    await client.set(
+        route=Route("user", "profile", "age"),
+        value=31,
+        save_on_disk=True,
+        codec="json",
+        path="config.json",
+        threadsafe=True,
+    )  # -> 31
     print(await client.all())
 
-    # Drop the entire top-level route & Save on disk
-    await client.drop(Route("user"), save=True)
+    # Delete part of a route
+    await client.delete(
+        route=Route("user", "profile", "age"),
+        save_on_disk=True,
+        codec="json",
+        path="config.json",
+        threadsafe=True,
+    )
+    print(await client.all())
+
+    # Drop the entire top-level route
+    await client.drop(route=Route("user"))
     print(await client.all())  # -> {}
 
     await asyncio.Future()
+
 
 if __name__ == "__main__":
     try:
@@ -144,9 +155,9 @@ python client.py
 ### Storing Nested Data
 
 ```python
-await client.set(Route("blog", "posts", "1", "title"), "Hello World")
-await client.set(Route("blog", "posts", "1", "tags"), ["intro", "nemoria"])
-await client.set(Route("blog", "posts", "2", "title"), "Async Rocks")
+await client.set(route=Route("blog", "posts", "1", "title"), value="Hello World")
+await client.set(route=Route("blog", "posts", "1", "tags"), value=["intro", "nemoria"])
+await client.set(route=Route("blog", "posts", "2", "title"), value="Async Rocks")
 
 print(await client.all())
 # {
@@ -163,16 +174,16 @@ print(await client.all())
 
 ```python
 # Delete just one nested field
-await client.delete(Route("blog", "posts", "1", "tags"))
+await client.delete(route=Route("blog", "posts", "1", "tags"))
 
 # Drop entire "posts" subtree
-await client.drop(Route("blog", "posts"))
+await client.drop(route=Route("blog", "posts"))
 
 # Clear entire datastore
 await client.purge()
 
 # Save on disk
-await client.save()
+await client.save(codec="yaml", path="config.yaml", threadsafe=True)
 ```
 
 ### Ping & Healthcheck

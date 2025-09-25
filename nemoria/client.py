@@ -1,58 +1,45 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
-
-"""
-Async client for a lightweight, in-memory data store over TCP.
-
-This client opens a TCP connection, performs a handshake, sends framed
-requests, and receives framed responses. It provides helpers for common
-operations (GET/ALL/SET/DELETE/DROP/PURGE) and a latency probe (PING).
-
-Concurrency model:
-    A single socket (StreamReader/StreamWriter) is shared across requests.
-    To avoid concurrent reads on the same StreamReader, requests are serialized
-    via `self.lock`. Out-of-order frames that arrive while waiting for a
-    specific reply are buffered in `self.inbox`.
-
-Persistence note (SAVE):
-    When invoked via convenience flags (e.g., `set(..., save=True)`), the client
-    emits SAVE in a best-effort, fire-and-forget manner (it does NOT await an
-    ACK). This prevents blocking on potentially long server-side I/O. If you
-    need durability feedback, design an explicit ACK or later consistency probe.
-"""
-
 from __future__ import annotations
 
 import asyncio, signal, time
-from pyroute import Route
 from collections import deque
-from typing import Optional, Any, Union, Hashable, Dict, Literal, Deque
+from typing import Optional, Any, Union, Literal, Deque, overload
+
+from pyroute import Route
+from configio.schemas import PathType
 from nemoria.logger import logger
 from nemoria.config import DEFAULT_TIMEOUT, PING_TIMEOUT, HANDSHAKE_TIMEOUT
 from nemoria.protocol import Connection, Frame, Action, JSON
 from nemoria.utils import send, recv
 
 
+"""
+Async TCP client for the Nemoria in-memory store.
+
+- Opens a TCP connection, performs a handshake, and exchanges framed requests.
+- Serializes request/response usage of a single socket with `self.lock`.
+- Buffers out-of-order frames in `self.inbox` while waiting for a specific reply.
+- Provides helpers for GET/ALL/SET/DELETE/DROP/PURGE/SAVE/PING.
+
+SAVE behavior:
+    When `save_on_disk=True` (or `save()` is called), the client sends a SAVE
+    frame as a one-way signal and does not wait for any server reply. If you need
+    durability confirmation, add an explicit confirmation step at the protocol level.
+"""
+
+
 class Client:
     """
-    Async client for the Nemoria store protocol.
+    Minimal async client for the Nemoria store protocol.
 
     Responsibilities:
-        - Open/close a TCP connection to the server.
-        - Perform the initial handshake and keep peer metadata (`Connection`).
-        - Send framed requests and await matching replies.
-        - Provide helpers for GET/ALL/SET/DELETE/DROP/PURGE/PING and liveness checks.
+        - Connect/close TCP sockets and perform the initial handshake.
+        - Send framed requests and await matching replies when the protocol responds.
+        - Offer convenience methods for common store operations.
 
-    Concurrency model:
-        Requests are serialized via `self.lock` so that a single request/response
-        pair uses the socket at a time. This avoids concurrent reads on the same
-        `StreamReader`. For high-throughput scenarios, consider a dedicated
-        reader-task + pending-map architecture.
-
-    SAVE semantics:
-        The client may emit SAVE as a best-effort, non-blocking signal (no ACK
-        awaited) when `save=True` is passed to convenience methods. This choice
-        avoids blocking the event loop on disk I/O latency.
+    Concurrency:
+        A single `StreamReader`/`StreamWriter` pair is shared. To avoid concurrent
+        reads on the same reader, calls are serialized with `self.lock`. Out-of-order
+        frames are buffered in `self.inbox`.
     """
 
     def __init__(
@@ -62,50 +49,42 @@ class Client:
         password: Optional[str] = None,
     ) -> None:
         """
-        Initialize the client state (does not connect).
+        Create a client (does not connect).
 
         Args:
-            host: Server hostname or IP (e.g., "localhost", "127.0.0.1").
+            host: Server host or IP.
             port: Server TCP port.
-            password: Optional shared secret.
+            password: Optional shared secret for frame auth/enc.
         """
         self.host = host
         self.port = port
         self.password = password
 
-        # Connection endpoints and context (populated by connect()).
         self.connection: Optional[Connection] = None
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
 
-        # Buffer for out-of-order frames while waiting for a specific reply.
-        # Size-limited to avoid unbounded growth.
+        # Buffer unrelated frames while waiting for a specific reply.
         self.inbox: Deque[Frame] = deque(maxlen=1024)
 
-        # Serialize request/response I/O over a single socket.
+        # Serialize request/response I/O over one socket.
         self.lock = asyncio.Lock()
 
     async def connect(self) -> bool:
         """
         Open the TCP connection and complete the handshake.
 
-        Behavior:
-            - Establish a TCP connection to (host, port).
-            - Perform a protocol handshake and read server `Connection` metadata.
-            - Register best-effort signal handlers (SIGINT/SIGTERM) for clean close.
-            - On failure, log the error and close any half-open resources.
+        - Connect to (host, port).
+        - Send HANDSHAKE and parse `Connection` metadata.
+        - Register SIGINT/SIGTERM handlers for best-effort graceful close.
 
         Returns:
-            True on success, False otherwise.
+            True on success; False otherwise.
         """
         try:
-            # Establish connection.
             self.reader, self.writer = await asyncio.open_connection(
-                self.host,
-                self.port,
+                self.host, self.port
             )
-
-            # Perform handshake and read server's connection metadata.
             if (connection_json := await self.handshake()) is None:
                 raise ConnectionError
             self.connection = Connection.deserialize(
@@ -113,7 +92,7 @@ class Client:
             )
             logger.info(f"{self.connection} SECURED.")
 
-            # OS signal handlers → request a graceful close (best-effort).
+            # Best-effort OS signal handlers (may not exist on some platforms).
             loop = asyncio.get_running_loop()
             try:
                 loop.add_signal_handler(
@@ -123,26 +102,21 @@ class Client:
                     signal.SIGTERM, lambda: asyncio.create_task(self.close())
                 )
             except NotImplementedError:
-                # Some platforms (e.g., Windows) may not support this.
                 pass
-
-            # Success
             return True
+
         except ConnectionError:
-            logger.error(f"Connection not established.")
+            logger.error("Connection not established.")
         except Exception:
             logger.error(f"Connection to {(self.host, self.port)} FAILED.")
-            # Ensure any half-open endpoints are closed.
             await self.close()
-
-        # Failed
         return False
 
     async def close(self) -> None:
         """
-        Close the client socket and release resources.
+        Close the socket and release resources.
 
-        Idempotent: safe to call multiple times. Logs on clean close.
+        Idempotent: safe to call multiple times.
         """
         if self.writer is not None:
             try:
@@ -158,7 +132,7 @@ class Client:
 
     async def shutdown(self) -> None:
         """
-        Request a server-side shutdown (best-effort).
+        Request server shutdown (best effort).
 
         Raises:
             ConnectionError: If not connected.
@@ -169,10 +143,7 @@ class Client:
 
     async def _send(self, frame: Frame) -> None:
         """
-        Send a frame to the server.
-
-        Args:
-            frame: The frame to send.
+        Send a frame to the server (no reply expected).
 
         Raises:
             ConnectionError: If not connected.
@@ -183,18 +154,13 @@ class Client:
 
     async def _receive(self, reply_to: Optional[Frame] = None) -> Optional[Frame]:
         """
-        Receive the next frame (optionally awaiting a matching reply).
+        Receive the next frame; optionally wait for a specific reply.
 
-        If `reply_to` is provided, unrelated frames are buffered in `inbox`
-        until a frame with a matching `reply_to` arrives. This lets the client
-        wait deterministically for the intended response without dropping other
-        frames that may have arrived out of order.
-
-        Args:
-            reply_to: The originating request frame to match by `reply_to`.
+        If `reply_to` is given, unrelated frames are buffered in `self.inbox`
+        until a matching reply arrives.
 
         Returns:
-            The received frame, or `None` if the connection was closed.
+            The frame, or None if the connection closed.
 
         Raises:
             ConnectionError: If not connected.
@@ -203,13 +169,13 @@ class Client:
             raise ConnectionError("Connection not established.")
 
         while True:
-            # Fast path: check buffered responses first.
-            for frame in list(self.inbox):  # iterate over a snapshot
-                if reply_to is not None and reply_to == frame.reply_to:
-                    self.inbox.remove(frame)  # important: consume from inbox
-                    return frame
+            # Prefer buffered frames first.
+            for f in list(self.inbox):
+                if reply_to is not None and reply_to == f.reply_to:
+                    self.inbox.remove(f)
+                    return f
 
-            # Await a fresh frame from the wire.
+            # Await a new frame from the wire.
             try:
                 response = await recv(self.reader, self.password)
             except (
@@ -222,7 +188,6 @@ class Client:
                 await self.close()
                 return None
 
-            # Protocol-level EOF/None → clean close.
             if response is None:
                 await self.close()
                 return None
@@ -230,27 +195,21 @@ class Client:
             if reply_to is not None:
                 if reply_to == response.reply_to:
                     return response
-                # Buffer unrelated responses and continue waiting.
                 self.inbox.append(response)
                 continue
 
-            # Not awaiting a specific reply; return what we got.
             return response
 
     async def _request(
         self, frame: Frame, timeout: Optional[float] = DEFAULT_TIMEOUT
     ) -> Optional[Frame]:
         """
-        Send a request and await its corresponding response.
+        Send a request and await its matching response when the protocol replies.
 
-        Serialized by `self.lock` to avoid concurrent reads on the socket.
-
-        Args:
-            frame: The request frame to send.
-            timeout: Optional timeout in seconds. If `None`, waits indefinitely.
+        Calls are serialized by `self.lock` to avoid concurrent reads.
 
         Returns:
-            The matching response, or `None` on timeout/connection close.
+            Matching response frame, or None on timeout/close.
 
         Raises:
             ConnectionError: If not connected.
@@ -259,7 +218,6 @@ class Client:
             raise ConnectionError("Connection not established.")
 
         async with self.lock:
-            # Transmit
             try:
                 await self._send(frame)
             except (ConnectionError, ConnectionResetError, OSError) as e:
@@ -267,25 +225,19 @@ class Client:
                 await self.close()
                 return None
 
-            # Await matching reply (or next frame if not specified)
             try:
-                recv_coro = self._receive(reply_to=frame)
-                return (
-                    await asyncio.wait_for(recv_coro, timeout)
-                    if timeout
-                    else await recv_coro
-                )
+                coro = self._receive(reply_to=frame)
+                return await asyncio.wait_for(coro, timeout) if timeout else await coro
             except asyncio.TimeoutError:
                 logger.error(f"Request timed out after {timeout:.2f}s")
                 return None
 
     async def is_alive(self) -> bool:
         """
-        Lightweight liveness check for the connection.
+        Quick liveness probe.
 
         Returns:
-            True if endpoints are healthy and a PING round-trip succeeds;
-            False otherwise.
+            True if socket endpoints are healthy and PING succeeds.
         """
         if self.reader is None or self.writer is None:
             return False
@@ -293,122 +245,271 @@ class Client:
             return False
         return (await self.ping()) is not None
 
-    async def get(self, route: Route) -> Optional[Any]:
+    async def get(self, route: Optional[Route] = None) -> Optional[Any]:
         """
-        Fetch a value from the store.
+        GET a single value.
 
         Args:
-            route: The route/key to fetch.
+            route: Route/key to read.
 
         Returns:
-            The value contained in the response frame (or `None` on failure).
+            Value from the response, or None on failure.
         """
         frame = await self._request(Frame(action=Action.GET, route=route))
         return None if frame is None else frame.value
 
-    async def all(self) -> Optional[Dict[Hashable, Any]]:
+    async def all(self) -> Optional[JSON]:
         """
-        Fetch the entire store contents (server-defined semantics).
+        Fetch the entire store (server-defined semantics).
+
+        Returns:
+            The store JSON, or None on failure.
         """
         frame = await self._request(Frame(action=Action.ALL))
         return None if frame is None else frame.value
 
-    async def set(self, route: Route, value: Any, save: bool = False) -> bool:
+    @overload
+    async def set(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        value: Optional[Any] = ...,
+        overwrite_conflicts: bool = ...,
+        save_on_disk: Literal[False] = False,
+        codec: None = None,
+        path: None = None,
+        threadsafe: bool = True,
+    ) -> None: ...
+    @overload
+    async def set(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        value: Optional[Any] = ...,
+        overwrite_conflicts: bool = ...,
+        save_on_disk: Literal[True] = True,
+        codec: Literal["json", "yaml"] = ...,
+        path: PathType = ...,
+        threadsafe: bool = True,
+    ) -> None: ...
+
+    async def set(
+        self,
+        *,
+        route: Optional[Route] = None,
+        value: Optional[Any] = None,
+        overwrite_conflicts: bool = False,
+        save_on_disk: bool = False,
+        codec: Optional[Literal["json", "yaml"]] = None,
+        path: Optional[PathType] = None,
+        threadsafe: bool = True,
+    ) -> None:
         """
-        Set a value in the store.
+        Set a value.
 
         Args:
-            route: The path/route to write.
-            value: The value to store (must be protocol-serializable).
-            save: If True, also trigger a SAVE operation to persist changes.
-
-        Returns:
-            True on ACK, False on timeout/error.
+            route: Path to write.
+            value: Protocol-serializable value.
+            overwrite_conflicts: Overwrite non-mapping nodes when building intermediates.
+            save_on_disk: Also send a one-way SAVE after the update (no reply expected).
+            codec, path, threadsafe: SAVE parameters (required if `save_on_disk=True`).
         """
-        if (
-            await self._request(Frame(action=Action.SET, route=route, value=value))
-        ) is not None:
-            if save:
-                await self.save()
-            return True
-        return False
+        await self._request(
+            Frame(
+                action=Action.SET,
+                route=route,
+                value={
+                    "value": value,
+                    "overwrite_conflicts": overwrite_conflicts,
+                    "save_on_disk": save_on_disk,
+                    "codec": None if codec is None else codec,
+                    "path": None if path is None else str(path),
+                    "threadsafe": threadsafe,
+                },
+            )
+        )
 
-    async def delete(self, route: Route, save: bool = False) -> bool:
+    @overload
+    async def delete(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        save_on_disk: Literal[False] = False,
+        codec: None = None,
+        path: None = None,
+        threadsafe: bool = True,
+    ) -> None: ...
+    @overload
+    async def delete(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        save_on_disk: Literal[True] = True,
+        codec: Literal["json", "yaml"] = ...,
+        path: PathType = ...,
+        threadsafe: bool = True,
+    ) -> None: ...
+
+    async def delete(
+        self,
+        *,
+        route: Optional[Route] = None,
+        save_on_disk: bool = False,
+        codec: Optional[Literal["json", "yaml"]] = None,
+        path: Optional[PathType] = None,
+        threadsafe: bool = True,
+    ) -> None:
         """
-        Delete a value from the store.
-
-        Args:
-            route: The path/route to remove.
-            save: If True, also trigger a SAVE operation to persist changes.
-
-        Returns:
-            True on ACK, False on timeout/error.
-        """
-        if (await self._request(Frame(action=Action.DELETE, route=route))) is not None:
-            if save:
-                await self.save()
-            return True
-        return False
-
-    async def drop(self, route: Route, save: bool = False) -> bool:
-        """
-        Drop the key at `route` entirely and prune empty ancestors upwards.
+        Delete a subtree.
 
         Semantics:
-            - Remove the target key itself (and its subtree, if any).
-            - If any parent becomes empty, remove it too (recursive prune).
+            Removes the target subtree. Collapsing parents is server-defined.
 
         Args:
-            route: The path/route to remove.
-            save: If True, also trigger a SAVE operation to persist changes.
-
-        Returns:
-            True on ACK, False on timeout/error.
+            route: Path to remove.
+            save_on_disk: Also send a one-way SAVE after the update (no reply expected).
+            codec, path, threadsafe: SAVE parameters (required if `save_on_disk=True`).
         """
-        if (await self._request(Frame(action=Action.DROP, route=route))) is not None:
-            if save:
-                await self.save()
-            return True
-        return False
+        await self._request(
+            Frame(
+                action=Action.DELETE,
+                route=route,
+                value={
+                    "save_on_disk": save_on_disk,
+                    "codec": None if codec is None else codec,
+                    "path": None if path is None else str(path),
+                    "threadsafe": threadsafe,
+                },
+            )
+        )
 
-    async def purge(self, save: bool = False) -> bool:
+    @overload
+    async def drop(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        save_on_disk: Literal[False] = False,
+        codec: None = None,
+        path: None = None,
+        threadsafe: bool = True,
+    ) -> None: ...
+    @overload
+    async def drop(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        save_on_disk: Literal[True] = True,
+        codec: Literal["json", "yaml"] = ...,
+        path: PathType = ...,
+        threadsafe: bool = True,
+    ) -> None: ...
+
+    async def drop(
+        self,
+        *,
+        route: Optional[Route] = None,
+        save_on_disk: bool = False,
+        codec: Optional[Literal["json", "yaml"]] = None,
+        path: Optional[PathType] = None,
+        threadsafe: bool = True,
+    ) -> None:
         """
-        Clear all data in the store (destructive).
+        Drop a key and prune empty ancestors.
+
+        Semantics:
+            Removes the target key (and subtree). Ancestor pruning is server-defined.
 
         Args:
-            save: If True, also trigger a SAVE operation to persist changes.
-
-        Returns:
-            True on ACK, False on timeout/error.
+            route: Path to drop.
+            save_on_disk: Also send a one-way SAVE after the update (no reply expected).
+            codec, path, threadsafe: SAVE parameters (required if `save_on_disk=True`).
         """
-        if (await self._request(Frame(action=Action.PURGE))) is not None:
-            if save:
-                await self.save()
-            return True
-        return False
+        await self._request(
+            Frame(
+                action=Action.DROP,
+                route=route,
+                value={
+                    "save_on_disk": save_on_disk,
+                    "codec": None if codec is None else codec,
+                    "path": None if path is None else str(path),
+                    "threadsafe": threadsafe,
+                },
+            )
+        )
 
-    async def save(self) -> None:
+    @overload
+    async def purge(
+        self,
+        *,
+        save_on_disk: Literal[False] = False,
+        codec: None = None,
+        path: None = None,
+        threadsafe: bool = True,
+    ) -> None: ...
+    @overload
+    async def purge(
+        self,
+        *,
+        save_on_disk: Literal[True],
+        codec: Literal["json", "yaml"],
+        path: PathType,
+        threadsafe: bool = True,
+    ) -> None: ...
+
+    async def purge(
+        self,
+        *,
+        save_on_disk: bool = False,
+        codec: Optional[Literal["json", "yaml"]] = None,
+        path: Optional[PathType] = None,
+        threadsafe: bool = True,
+    ) -> None:
         """
-        Trigger a SAVE operation on the server (fire-and-forget).
+        Clear the entire store (destructive).
+
+        Args:
+            save_on_disk: Also send a one-way SAVE after clearing (no reply expected).
+            codec, path, threadsafe: SAVE parameters (required if `save_on_disk=True`).
+        """
+        await self._request(
+            Frame(
+                action=Action.PURGE,
+                value={
+                    "save_on_disk": save_on_disk,
+                    "codec": None if codec is None else codec,
+                    "path": None if path is None else str(path),
+                    "threadsafe": threadsafe,
+                },
+            )
+        )
+
+    async def save(
+        self,
+        codec: Literal["json", "yaml"],
+        path: PathType,
+        *,
+        threadsafe: bool = True,
+    ) -> None:
+        """
+        Send a SAVE frame as a one-way persistence request.
 
         Notes:
-            - Sends a SAVE frame to the server but does not wait for any ACK.
-            - Useful when persistence should be requested without blocking the client.
-            - If you require confirmation that the data was written, use an explicit
-            consistency check or design a server-side ACK.
+            This method does not wait for any server reply. Use a separate
+            confirmation/verification step if your workflow requires it.
         """
-        await self._send(Frame(action=Action.SAVE))
+        await self._send(
+            Frame(
+                action=Action.SAVE,
+                value={"codec": codec, "path": str(path), "threadsafe": threadsafe},
+            )
+        )
 
     async def ping(self) -> Optional[float]:
         """
-        Send PING and measure round-trip-time latency (RTT).
-
-        Notes:
-            This is a lightweight liveness probe. For throughput testing, prefer
-            application-level benchmarks.
+        Send PING and return round-trip latency in milliseconds.
 
         Returns:
-            Latency in milliseconds, or `None` on timeout/connection error.
+            RTT in ms, or None on timeout/connection error.
         """
         start = time.perf_counter()
         if (await self._request(Frame(action=Action.PING), PING_TIMEOUT)) is None:
@@ -419,14 +520,10 @@ class Client:
 
     async def handshake(self) -> Optional[JSON]:
         """
-        Perform a protocol handshake and return the server's connection info.
-
-        Behavior:
-            Sends a HANDSHAKE frame and expects a serialized `Connection` JSON
-            in the reply. If the reply is missing or malformed, returns `None`.
+        Perform the protocol handshake and return server connection info.
 
         Returns:
-            The server's serialized `Connection` JSON on success, otherwise `None`.
+            Serialized `Connection` JSON from the server, or None on failure.
         """
         resp = await self._request(Frame(action=Action.HANDSHAKE), HANDSHAKE_TIMEOUT)
         return None if resp is None or resp.value is None else resp.value

@@ -1,400 +1,332 @@
-"""
-Async-safe nested key-value store with a flat per-route lock map.
-
-This module keeps application data (`db`) as nested dictionaries while
-per-route locks are stored in a *flat* map keyed by the route object.
-A meta-lock (`locks_guard`) serializes on-demand lock creation to prevent
-races where concurrent tasks might create two different locks for the same
-route.
-
-Typical usage:
-    store = Store(file="/path/to/state.json", file_format="JSON")
-    await store.set(Route("users", "42", "name"), "Alice")
-    name = await store.get(Route("users", "42", "name"))
-    await store.delete(Route("users", "42"))      # collapses parent to None
-    await store.drop(Route("users"))              # prunes empty ancestors
-    await store.save()                            # async + atomic persistence
-
-Persistence:
-    Use `await store.save()` to persist `db` to disk. Saving is performed
-    asynchronously using `aiofiles` and is atomic (temp → replace). The file
-    file_format is either "JSON" or "YAML" (see `FORMATS`).
-"""
-
 from __future__ import annotations
 
-import os
-import json
-import yaml
 import asyncio
-import aiofiles
-import aiofiles.os as aios
+from typing import Optional, Any, Dict, Literal, overload, cast
+
+from configio import ConfigIO, Loader, Codec
+from configio.schemas import PathType
 from pyroute import Route
-from typing import Optional, Any, Hashable, MutableMapping, Dict
 from nemoria.logger import logger
+from nemoria.protocol import JSON
 
+"""
+Async-friendly nested key-value store with per-route locks.
 
-FORMATS = ("JSON", "YAML")
+`Store` keeps data as nested dictionaries (`JSON`) and uses a *flat* map of
+`asyncio.Lock`s keyed by `Route` (including `None`). A meta-lock
+(`locks_guard`) serializes on-demand lock creation to avoid duplicate locks.
+
+Quick start:
+    store = Store()
+    await store.set(route=Route("users", "42", "name"), value="Alice")
+    name = await store.get(route=Route("users", "42", "name"))
+    await store.delete(route=Route("users", "42"))      # collapse only immediate parent
+    await store.drop(route=Route("users"))              # prune empty ancestors
+    await store.save(Codec.JSON, "/path/state.json")    # async + atomic persistence
+
+Persistence:
+    Call `save(codec, path)` to persist `self.data` atomically (temp→replace)
+    via ConfigIO. Codecs: `Codec.JSON`, `Codec.YAML`.
+
+Typing:
+    Overloads on `set`/`delete`/`drop`/`purge` require `codec` and `path`
+    when `save_on_disk=True`.
+"""
 
 
 class Store:
     """
-    Task-safe nested store for asyncio workloads using a flat per-route lock map.
+    Async-safe nested store with a flat per-route lock map.
 
-    Data:
-        - `self.db`: nested dictionaries storing arbitrary values.
-        - `self.locks`: flat map of per-route asyncio locks.
-        - `self.locks_guard`: meta-lock that serializes lock creation so that
-          concurrent tasks do not create duplicate locks for the same route.
+    Attributes:
+        data: Nested dictionary of arbitrary values (`JSON`).
+        locks: Map of `Route | None` → `asyncio.Lock`.
+        locks_guard: Meta-lock that serializes lock creation.
 
     Notes:
-        - `get()` returns `None` when the path is missing.
-        - `set()` auto-creates intermediate dictionaries along the path.
-        - `delete()` removes a subtree and, if the *immediate* parent becomes
-          empty, replaces that parent with `None` (no recursive prune).
-        - `drop()` removes the key and *recursively* prunes empty ancestors.
-        - Locks are created lazily upon first use of a route.
+        - `get()` returns `None` for missing paths.
+        - `set()` creates intermediate dicts as needed.
+        - `delete()` can collapse only the *immediate* parent to `None`.
+        - `drop()` recursively prunes empty ancestors.
     """
 
-    def __init__(
-        self,
-        file: Optional[str] = None,
-        file_format: Optional[str] = None,
-    ) -> None:
+    def __init__(self, initial_data: Optional[JSON] = None) -> None:
         """
-        Initialize empty data and lock maps.
+        Initialize store state.
 
-        Creates:
-            - `db`: the nested data dictionary.
-            - `locks`: the flat lock dictionary (Route-keyed).
-            - `locks_guard`: a meta-lock used only to serialize lock creation.
-
-        Persistence:
-            - `file` and `file_format` configure optional persistence. See `save()`.
+        Args:
+            initial_data: Optional initial JSON (shallow-copied to avoid aliasing).
         """
-        self.file = file
-        self.file_format = file_format
+        self.data: JSON = dict(initial_data) if initial_data else {}
+        self.locks: Dict[Optional[Route], asyncio.Lock] = {}  # Route (or None) -> Lock
+        self.locks_guard = asyncio.Lock()
 
-        self.db: Dict[Hashable, Any] = {}
-        self.locks: Dict[Hashable, asyncio.Lock] = {}  # flat: Route (or key) -> Lock
-        self.locks_guard = asyncio.Lock()  # guards lock creation
-
-    async def lock(self, route: Route) -> asyncio.Lock:
+    async def lock(self, route: Optional[Route] = None) -> asyncio.Lock:
         """
-        Return the per-route lock for `route`, creating it if necessary.
-
-        Fast path:
-            Return an existing lock from `self.locks`.
-
-        Slow path:
-            Under `self.locks_guard`, create and memoize a new lock
-            if one does not already exist.
-
-        This method never raises due to lock lookup or creation.
+        Return the per-route lock, creating it lazily under `locks_guard`.
         """
-        # Fast path
         lock = self.locks.get(route)
         if lock is not None:
             return lock
-
-        # Slow path: serialize creation to avoid duplicates
         async with self.locks_guard:
             return self.locks.setdefault(route, asyncio.Lock())
 
-    async def get(self, route: Route) -> Optional[Any]:
+    async def get(self, route: Optional[Route] = None) -> Any:
         """
-        Read and return the value at `route`, or `None` if missing.
-
-        Concurrency:
-            Acquires the per-route lock to serialize with concurrent writers.
-
-        Args:
-            route: Path to read.
-
-        Returns:
-            The stored value, or `None` if the path does not exist.
+        Read the value at `route` (or root if `None`). Returns `None` if missing.
         """
         async with await self.lock(route):
             try:
-                return await self._get(self.db, route)
-            except KeyError:
+                return await ConfigIO.get(Loader.DATA, data=self.data, route=route)
+            except TypeError as e:
+                logger.error(f"[GET] -> {e}")
                 return None
 
-    async def all(self) -> Dict[Hashable, Any]:
+    async def all(self) -> JSON:
         """
-        Return the internal data dictionary **by reference** (unsafe for mutation).
-
-        Warning:
-            This returns the live underlying dict. External code can mutate it
-            without locking, bypassing `set()`/`delete()`. Prefer exposing a
-            snapshot (`json.loads(json.dumps(self.db))`) if you need safety.
-
-        Returns:
-            The internal `db` dictionary (live reference).
+        Return the live internal dictionary (mutable; expose with care).
         """
-        return self.db
+        async with self.locks_guard:
+            return self.data
 
-    async def set(self, route: Route, value: Any) -> None:
+    @overload
+    async def set(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        value: Optional[Any] = ...,
+        overwrite_conflicts: bool = ...,
+        save_on_disk: Literal[False] = False,
+        codec: None = None,
+        path: None = None,
+        threadsafe: bool = True,
+    ) -> None: ...
+    @overload
+    async def set(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        value: Optional[Any] = ...,
+        overwrite_conflicts: bool = ...,
+        save_on_disk: Literal[True] = True,
+        codec: Literal[Codec.JSON, Codec.YAML] = ...,
+        path: PathType = ...,
+        threadsafe: bool = True,
+    ) -> None: ...
+
+    async def set(
+        self,
+        *,
+        route: Optional[Route] = None,
+        value: Optional[Any] = None,
+        overwrite_conflicts: bool = False,
+        save_on_disk: bool = False,
+        codec: Optional[Literal[Codec.JSON, Codec.YAML]] = None,
+        path: Optional[PathType] = None,
+        threadsafe: bool = True,
+    ) -> None:
         """
-        Write `value` at `route`, creating intermediate dictionaries as needed.
+        Write `value` at `route`, creating intermediates as needed.
 
-        Concurrency:
-            Acquires the per-route lock before writing.
-
-        Args:
-            route: Destination path.
-            value: Value to store.
-
-        Errors:
-            Exceptions from `_set()` (e.g., empty route or type mismatch) are
-            swallowed here; consider logging or re-raising in production.
+        If `save_on_disk=True`, requires `codec` and `path` and persists after update.
         """
         async with await self.lock(route):
             try:
-                await self._set(self.db, route, value)
-            except (ValueError, TypeError):
-                logger.exception("store.set failed", exc_info=True)
+                self.data = cast(
+                    JSON,
+                    await ConfigIO.set(
+                        Loader.DATA,
+                        data=self.data,
+                        route=route,
+                        value=value,
+                        overwrite_conflicts=overwrite_conflicts,
+                        save=False,
+                    ),
+                )
 
-    async def delete(self, route: Route) -> None:
+                if not save_on_disk:
+                    return
+                if codec is None or path is None:
+                    logger.error(
+                        "[SET] -> CODEC and PATH are required for saving on disk."
+                    )
+                    return
+                await self.save(codec, path, threadsafe=threadsafe)
+
+            except (TypeError, ValueError, OSError) as e:
+                logger.error(f"[SET] -> {e}")
+
+    @overload
+    async def delete(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        save_on_disk: Literal[False] = False,
+        codec: None = None,
+        path: None = None,
+        threadsafe: bool = True,
+    ) -> None: ...
+    @overload
+    async def delete(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        save_on_disk: Literal[True] = True,
+        codec: Literal[Codec.JSON, Codec.YAML] = ...,
+        path: PathType = ...,
+        threadsafe: bool = True,
+    ) -> None: ...
+
+    async def delete(
+        self,
+        *,
+        route: Optional[Route] = None,
+        save_on_disk: bool = False,
+        codec: Optional[Literal[Codec.JSON, Codec.YAML]] = None,
+        path: Optional[PathType] = None,
+        threadsafe: bool = True,
+    ) -> None:
         """
-        Delete the subtree at `route`, collapsing only the immediate parent to `None` if empty.
-
-        Semantics:
-            - Remove the target subtree (key and descendants).
-            - If the *immediate parent* becomes empty, replace that parent in its
-              own parent with `None`.
-            - No recursive pruning beyond the immediate parent.
-            - Special case for top-level: `delete(["k"])` sets `db["k"] = None`.
-
-        No-op if the path does not exist.
+        Delete the subtree at `route`. May collapse only the *immediate* parent to `None`.
         """
         async with await self.lock(route):
             try:
-                await self._delete(self.db, route, drop=False)
-            except ValueError:
-                logger.exception("store.delete failed", exc_info=True)
+                self.data = cast(
+                    JSON,
+                    await ConfigIO.delete(
+                        Loader.DATA,
+                        data=self.data,
+                        route=route,
+                        save=False,
+                    ),
+                )
 
-    async def drop(self, route: Route) -> None:
+                if not save_on_disk:
+                    return
+                if codec is None or path is None:
+                    logger.error(
+                        "[DELETE] -> CODEC and PATH are required for saving on disk."
+                    )
+                    return
+                await self.save(codec, path, threadsafe=threadsafe)
+
+            except (TypeError, ValueError, OSError) as e:
+                logger.error(f"[DELETE] -> {e}")
+
+    @overload
+    async def drop(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        save_on_disk: Literal[False] = False,
+        codec: None = None,
+        path: None = None,
+        threadsafe: bool = True,
+    ) -> None: ...
+    @overload
+    async def drop(
+        self,
+        *,
+        route: Optional[Route] = ...,
+        save_on_disk: Literal[True] = True,
+        codec: Literal[Codec.JSON, Codec.YAML] = ...,
+        path: PathType = ...,
+        threadsafe: bool = True,
+    ) -> None: ...
+
+    async def drop(
+        self,
+        *,
+        route: Optional[Route] = None,
+        save_on_disk: bool = False,
+        codec: Optional[Literal[Codec.JSON, Codec.YAML]] = None,
+        path: Optional[PathType] = None,
+        threadsafe: bool = True,
+    ) -> None:
         """
         Drop the key at `route` and recursively prune empty ancestors.
-
-        Semantics:
-            - Remove the target key (and its subtree, if any).
-            - If any parent becomes empty, remove it too (bottom-up).
-
-        No-op if the path does not exist.
         """
         async with await self.lock(route):
             try:
-                await self._delete(self.db, route, drop=True)
-            except ValueError:
-                logger.exception("store.drop failed", exc_info=True)
+                self.data = cast(
+                    JSON,
+                    await ConfigIO.delete(
+                        Loader.DATA,
+                        data=self.data,
+                        route=route,
+                        drop=True,
+                        save=False,
+                    ),
+                )
 
-    async def purge(self) -> None:
+                if not save_on_disk:
+                    return
+                if codec is None or path is None:
+                    logger.error(
+                        "[DROP] -> CODEC and PATH are required for saving on disk."
+                    )
+                    return
+                await self.save(codec, path, threadsafe=threadsafe)
+
+            except (TypeError, ValueError, OSError) as e:
+                logger.error(f"[DROP] -> {e}")
+
+    @overload
+    async def purge(
+        self,
+        *,
+        save_on_disk: Literal[False] = False,
+        codec: None = None,
+        path: None = None,
+        threadsafe: bool = True,
+    ) -> None: ...
+    @overload
+    async def purge(
+        self,
+        *,
+        save_on_disk: Literal[True],
+        codec: Literal[Codec.JSON, Codec.YAML],
+        path: PathType,
+        threadsafe: bool = True,
+    ) -> None: ...
+
+    async def purge(
+        self,
+        *,
+        save_on_disk: bool = False,
+        codec: Optional[Literal[Codec.JSON, Codec.YAML]] = None,
+        path: Optional[PathType] = None,
+        threadsafe: bool = True,
+    ) -> None:
         """
-        Clear all data and all locks.
-
-        Concurrency:
-            Guarded by `locks_guard` to ensure a consistent full reset.
+        Clear all data and locks. Optionally persist the empty store.
         """
         async with self.locks_guard:
-            self.db.clear()
+            self.data.clear()
             self.locks.clear()
 
-    async def save(self) -> None:
-        """
-        Persist `self.db` to disk and await completion.
+            if not save_on_disk:
+                return
+            if codec is None or path is None:
+                logger.error(
+                    "[PURGE] -> CODEC and PATH are required for saving on disk."
+                )
+                return
+            await self.save(codec, path, threadsafe=threadsafe)
 
-        Notes:
-            Uses atomic temp→replace semantics and non-blocking I/O under the hood.
+    async def save(
+        self,
+        codec: Literal[Codec.JSON, Codec.YAML],
+        path: PathType,
+        *,
+        threadsafe: bool = True,
+    ) -> None:
+        """
+        Persist `self.data` atomically via ConfigIO (temp→replace).
         """
         async with self.locks_guard:
-            asyncio.create_task(self._save(self.db, self.file, self.file_format))
-
-    @staticmethod
-    async def _get(obj: MutableMapping[Hashable, Any], route: Route) -> Any:
-        """
-        Traverse `obj` by `route` and return the value.
-
-        Args:
-            obj: Root mapping to traverse.
-            route: Successive keys used to descend.
-
-        Returns:
-            Value at the end of the route.
-
-        Raises:
-            KeyError: If any segment is missing.
-        """
-        cur: Any = obj
-        for seg in route:
-            if isinstance(cur, MutableMapping) and seg in cur:
-                cur = cur[seg]
-            else:
-                raise KeyError(seg)
-        return cur
-
-    @staticmethod
-    async def _set(
-        obj: MutableMapping[Hashable, Any],
-        route: Route,
-        value: Any,
-    ) -> None:
-        """
-        Set `value` at `route` inside `obj`, creating parents as needed.
-
-        Args:
-            obj: Root mapping to modify.
-            route: Path to set.
-            value: Value to assign.
-
-        Raises:
-            ValueError: If `route` is empty.
-            TypeError: If a non-mapping is encountered on the path.
-        """
-        if len(route) == 0:
-            raise ValueError("route cannot be empty")
-
-        cur: Any = obj
-        for seg in route[:-1]:
-            if not isinstance(cur, MutableMapping):
-                raise TypeError(f"expected mapping at segment {seg!r}")
-            if seg not in cur:
-                cur[seg] = {}  # auto-create intermediate dict
-            cur = cur[seg]
-
-        if not isinstance(cur, MutableMapping):
-            raise TypeError(f"expected mapping at final parent for {route[-1]!r}")
-        cur[route[-1]] = value
-
-    @staticmethod
-    async def _delete(
-        obj: MutableMapping[Hashable, Any],
-        route: Route,
-        drop: bool = False,
-    ) -> None:
-        """
-        Core delete logic used by `delete()` and `drop()`.
-
-        Modes:
-            - drop=True  : remove key; prune empty parents bottom-up.
-            - drop=False : remove subtree; if the immediate parent becomes empty,
-                           replace that parent (in its own parent) with `None`.
-                           Special-case: when len(route) == 1 -> obj[key] = None.
-
-        Behavior:
-            - Missing or malformed paths are silent no-ops.
-            - Empty route raises ValueError.
-            - Operates in-place on `obj`.
-        """
-        if len(route) == 0:
-            raise ValueError("route cannot be empty")
-
-        # Top-level special case for delete-mode
-        if not drop and len(route) == 1:
-            obj[route[0]] = None
-            return
-
-        # Walk to the parent of the target key
-        cur: Any = obj
-        parents: list[MutableMapping[Hashable, Any]] = []
-        keys: list[Hashable] = []
-        for seg in route[:-1]:
-            if not isinstance(cur, MutableMapping) or seg not in cur:
-                return  # no-op if path missing
-            parents.append(cur)
-            keys.append(seg)
-            cur = cur[seg]
-
-        if not isinstance(cur, MutableMapping):
-            return  # malformed path → no-op
-
-        target = route[-1]
-        if target not in cur:
-            return  # nothing to delete
-
-        # Remove the target subtree (or leaf)
-        cur.pop(target)
-
-        if drop:
-            # Prune empty parents bottom-up
-            node = cur
-            for gp, k in zip(reversed(parents), reversed(keys)):
-                if isinstance(node, MutableMapping) and not node:
-                    gp.pop(k, None)
-                    node = gp
-                else:
-                    break
-        else:
-            # Collapse only the immediate parent to None if it became empty
-            if not cur and parents:
-                gp = parents[-1]
-                key_of_parent = keys[-1]
-                gp[key_of_parent] = None
-
-    @staticmethod
-    async def _save(
-        obj: MutableMapping[Hashable, Any],
-        file: Optional[str],
-        file_format: Optional[str],
-    ) -> None:
-        """
-        Asynchronously save a database object to a file in JSON or YAML format.
-
-        Non-blocking I/O is done with `aiofiles`. The write is atomic:
-        the payload is written to a temporary file which then replaces the
-        target file via `replace()`. This minimizes the chance of partial writes.
-
-        Args:
-            obj: The mapping to serialize.
-            file: Destination path (must be a non-empty string).
-            file_format: "JSON" or "YAML" (see `FORMATS`).
-
-        Notes:
-            - If either `file` or `file_format` is falsy, the operation is aborted.
-            - Invalid formats are logged as errors.
-            - Serialization is done in memory first, then written asynchronously.
-            - File I/O exceptions are logged but not re-raised.
-        """
-        if not file or not file_format:
-            return
-
-        fmt = file_format.strip().upper()
-
-        # Ensure destination directory exists
-        parent = os.path.dirname(os.path.abspath(file))
-        if parent:
             try:
-                await aios.makedirs(parent, exist_ok=True)
-            except FileExistsError:
-                pass
-
-        # Serialize in memory
-        if fmt == "JSON":
-            payload = json.dumps(obj, indent=2, ensure_ascii=False)
-        elif fmt == "YAML":
-            payload = yaml.safe_dump(
-                obj, default_flow_style=False, allow_unicode=True, sort_keys=False
-            )
-        else:
-            logger.error(f"Store.save error - INVALID FILE FORMAT ({file_format})")
-            return
-
-        # Write to a temp file, then atomically replace
-        tmp_path = f"{file}.tmp.{os.getpid()}"
-
-        try:
-            async with aiofiles.open(
-                tmp_path, "w", encoding="utf-8", newline="\n"
-            ) as f:
-                await f.write(payload)
-                await f.flush()
-            await aios.replace(tmp_path, file)
-        except Exception as e:
-            logger.error(f"Unexpected error while saving store: {e}")
-            # Best-effort cleanup
-            try:
-                if await aios.path.exists(tmp_path):
-                    await aios.remove(tmp_path)
-            except Exception:
-                pass
+                # Note: argument order follows your current ConfigIO API.
+                await ConfigIO.save(self.data, codec, path, threadsafe=threadsafe)
+            except (TypeError, ValueError, OSError) as e:
+                logger.error(f"[SAVE] -> {e}")

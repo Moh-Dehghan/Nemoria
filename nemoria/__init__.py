@@ -43,5 +43,6 @@ from .server import Server
 from .client import Client
 from pyroute import Route
 
+
 __all__ = ("Server", "Client", "Route")
-__version__ = "1.0.6"
+__version__ = "1.1.0"

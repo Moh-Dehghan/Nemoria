@@ -1,3 +1,13 @@
+from __future__ import annotations
+
+import hashlib, base64, uuid, json, time
+from cryptography.fernet import Fernet
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from nemoria.protocol import JSON
+
+
 """
 Crypto & encoding helpers for Nemoria.
 
@@ -13,16 +23,6 @@ Security notes:
 - `decrypt` raises `PermissionError("Invalid Password")` for *any* decode/
   decrypt/parse failure to avoid leaking details about the cause.
 """
-
-from __future__ import annotations
-
-import hashlib, base64, uuid, json, time
-from cryptography.fernet import Fernet
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from nemoria.protocol import JSON
-
 
 __all__ = ("b64u_encode", "b64u_decode", "blake2b", "uniqID", "encrypt", "decrypt")
 

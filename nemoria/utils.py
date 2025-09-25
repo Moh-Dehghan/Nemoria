@@ -1,3 +1,12 @@
+from __future__ import annotations
+
+import asyncio
+import socket
+from typing import Optional
+from nemoria.cryptography import encrypt, decrypt
+from nemoria.protocol import Frame
+
+
 """
 Framed I/O utilities for the Nemoria protocol.
 
@@ -9,15 +18,6 @@ Messages are sent and received as **length-prefixed** binary frames:
 These helpers do not catch network/crypto errors beyond basic validation; such
 errors are allowed to propagate so callers can decide how to handle them.
 """
-
-from __future__ import annotations
-
-import asyncio
-import socket
-from typing import Optional
-from nemoria.cryptography import encrypt, decrypt
-from nemoria.protocol import Frame
-
 
 __all__ = ("recv", "send", "validate_addr")
 

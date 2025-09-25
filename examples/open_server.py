@@ -38,8 +38,6 @@ async def main():
         port=1234,
         namespace="Nemoria",
         password="12345678",
-        file="output.yaml",
-        file_format="YAML",
     )
 
     # Run server

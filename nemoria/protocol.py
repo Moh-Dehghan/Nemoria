@@ -1,3 +1,13 @@
+from __future__ import annotations
+
+import asyncio
+from pyroute import Route
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Optional, Hashable, Dict, Self
+from nemoria.cryptography import uniqID
+
+
 """
 Core protocol types for Nemoria.
 
@@ -10,15 +20,7 @@ This module defines three core types exchanged or managed by the transport:
                 plus its bound asyncio streams (reader/writer)
 """
 
-from __future__ import annotations
-
-import asyncio
-from pyroute import Route
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Optional, Hashable, Dict, Self
-from nemoria.cryptography import uniqID
-
+__all__ = ("JSON", "Action", "Frame", "Connection")
 
 # JSON-safe type alias (keys must be JSON-serializable, typically strings)
 JSON = Dict[Hashable, Any]

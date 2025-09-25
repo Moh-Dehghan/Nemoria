@@ -1,3 +1,20 @@
+from __future__ import annotations
+
+import asyncio
+import signal
+import contextlib
+from typing import Optional, Union, Literal, Set, cast
+from errno import EADDRINUSE, EACCES, EADDRNOTAVAIL
+
+from configio.schemas import Codec
+from nemoria.logger import logger
+from nemoria.config import HANDSHAKE_TIMEOUT
+from nemoria.protocol import JSON, Connection, Frame, Action
+from nemoria.store import Store
+from nemoria.cryptography import uniqID
+from nemoria.utils import send, recv, validate_addr
+
+
 """
 Async TCP server for a lightweight in-memory data store.
 
@@ -6,20 +23,6 @@ handshake, receives framed requests, dispatches them to handlers, and sends
 framed responses. It also provides graceful shutdown on OS signals or via
 a client request.
 """
-
-from __future__ import annotations
-
-import asyncio
-import signal
-import contextlib
-from typing import Optional, Union, Literal, Set
-from errno import EADDRINUSE, EACCES, EADDRNOTAVAIL
-from nemoria.logger import logger
-from nemoria.config import HANDSHAKE_TIMEOUT
-from nemoria.protocol import Connection, Frame, Action
-from nemoria.store import Store
-from nemoria.cryptography import uniqID
-from nemoria.utils import send, recv, validate_addr
 
 
 class Server:
@@ -44,8 +47,7 @@ class Server:
         port: int = 8888,
         namespace: str = "Nemoria",
         password: Optional[str] = None,
-        file: Optional[str] = None,
-        file_format: Optional[Literal["JSON", "YAML"]] = None,
+        initial_data: Optional[JSON] = None,
     ) -> None:
         """
         Initialize server state (does not bind or listen yet).
@@ -68,7 +70,7 @@ class Server:
         self.connections: Set[Connection] = set()
 
         # Application data store (customize/replace as needed)
-        self.store = Store(file=file, file_format=file_format)
+        self.store = Store(initial_data)
 
     async def run_forever(self, raise_on_error: bool = True) -> None:
         """
@@ -187,48 +189,111 @@ class Server:
         """
         match frame.action:
             case Action.GET:
-                result = None
-                if frame.route is not None:
-                    result = await self.store.get(frame.route)
                 await send(
                     connection.writer,
-                    Frame(value=result, reply_to=frame),
+                    Frame(value=await self.store.get(frame.route), reply_to=frame),
                     self.password,
                 )
 
             case Action.ALL:
-                result = await self.store.all()
                 await send(
                     connection.writer,
-                    Frame(value=result, reply_to=frame),
+                    Frame(value=await self.store.all(), reply_to=frame),
                     self.password,
                 )
 
             case Action.SET:
-                if frame.route is not None:
-                    await self.store.set(frame.route, frame.value)
+                kwargs = cast(dict, frame.value)
+                value = kwargs["value"]
+                overwrite_conflicts = kwargs["overwrite_conflicts"]
+                save_on_disk = kwargs["save_on_disk"]
+                codec = (
+                    None if kwargs["codec"] is None else Codec[kwargs["codec"].upper()]
+                )
+                path = kwargs["path"]
+                threadsafe = kwargs["threadsafe"]
+                # SET
+                await self.store.set(
+                    route=frame.route,
+                    value=value,
+                    overwrite_conflicts=overwrite_conflicts,
+                    save_on_disk=save_on_disk,
+                    codec=codec,
+                    path=path,
+                    threadsafe=threadsafe,
+                )
                 # ACK
                 await send(connection.writer, Frame(reply_to=frame), self.password)
 
             case Action.DELETE:
-                if frame.route is not None:
-                    await self.store.delete(frame.route)
+                kwargs = cast(dict, frame.value)
+                save_on_disk = kwargs["save_on_disk"]
+                codec = (
+                    None if kwargs["codec"] is None else Codec[kwargs["codec"].upper()]
+                )
+                path = kwargs["path"]
+                threadsafe = kwargs["threadsafe"]
+                # DELETE
+                await self.store.delete(
+                    route=frame.route,
+                    save_on_disk=save_on_disk,
+                    codec=codec,
+                    path=path,
+                    threadsafe=threadsafe,
+                )
                 # ACK
                 await send(connection.writer, Frame(reply_to=frame), self.password)
 
             case Action.DROP:
-                if frame.route is not None:
-                    await self.store.drop(frame.route)
+                kwargs = cast(dict, frame.value)
+                save_on_disk = kwargs["save_on_disk"]
+                codec = (
+                    None if kwargs["codec"] is None else Codec[kwargs["codec"].upper()]
+                )
+                path = kwargs["path"]
+                threadsafe = kwargs["threadsafe"]
+                # DROP
+                await self.store.drop(
+                    route=frame.route,
+                    save_on_disk=save_on_disk,
+                    codec=codec,
+                    path=path,
+                    threadsafe=threadsafe,
+                )
                 # ACK
                 await send(connection.writer, Frame(reply_to=frame), self.password)
 
             case Action.PURGE:
-                await self.store.purge()
+                kwargs = cast(dict, frame.value)
+                save_on_disk = kwargs["save_on_disk"]
+                codec = (
+                    None if kwargs["codec"] is None else Codec[kwargs["codec"].upper()]
+                )
+                path = kwargs["path"]
+                threadsafe = kwargs["threadsafe"]
+                # PURGE
+                await self.store.purge(
+                    save_on_disk=save_on_disk,
+                    codec=codec,
+                    path=path,
+                    threadsafe=threadsafe,
+                )
                 # ACK
                 await send(connection.writer, Frame(reply_to=frame), self.password)
 
             case Action.SAVE:
-                await self.store.save()
+                kwargs = cast(dict, frame.value)
+                codec = cast(
+                    Literal[Codec.JSON, Codec.YAML], Codec[kwargs["codec"].upper()]
+                )
+                path = kwargs["path"]
+                threadsafe = kwargs["threadsafe"]
+                # SAVE
+                await self.store.save(
+                    codec,
+                    path,
+                    threadsafe=threadsafe,
+                )
 
             case Action.PING:
                 await send(connection.writer, Frame(reply_to=frame), self.password)
